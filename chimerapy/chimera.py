@@ -1,22 +1,29 @@
+from argparse import ArgumentParser
+
 import numpy as np
 from matplotlib import colors
 from numpy.typing import NDArray
 from skimage import measure
 from skimage.draw import polygon2mask
 from sunpy.map import Map, all_coordinates_from_map, coordinate_is_on_solar_disk
+from sunpy.net import Fido
+from sunpy.net import attrs as a
+from sunpy.time import parse_time
 
 import astropy.units as u
 from astropy.units import Quantity
 
+from chimerapy import log
+
 
 def generate_candidate_mask(m171, m193, m211):
     r"""
-    Generate Chimera mask.
+    Generate coronal hole candidate mask based image ratios.
 
     Parameters
     ----------
     m171 : `sunpy.map.Map
-        This is the 171 Ångström UV map.
+        A 171 Ångström UV map.
     m193 : `sunpy.map.Map
         This is the 193 Ångström UV map.
     m211 : `sunpy.map.Map
@@ -52,17 +59,18 @@ def generate_candidate_mask(m171, m193, m211):
     d211_clipped = np.clip(np.log10(m211.data), d211_min, d211_max)
     d211_clipped_scaled = ((d211_clipped - d211_min) / (d211_max - d211_min)) * 255
 
-    mask_171_211 = (d171_clipped_scaled / d211_clipped_scaled) >= (
-        (np.mean(m171.data[disk_mask]) * threshold_171v211) / np.mean(m211.data[disk_mask])
-    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mask_171_211 = (d171_clipped_scaled / d211_clipped_scaled) >= (
+            (np.mean(m171.data[disk_mask]) * threshold_171v211) / np.mean(m211.data[disk_mask])
+        )
 
-    mask_211_193 = (d211_clipped_scaled + d193_clipped_scaled) < (
-        threshold_193v211 * (np.mean(m193.data[disk_mask]) + np.mean(m211.data[disk_mask]))
-    )
+        mask_211_193 = (d211_clipped_scaled + d193_clipped_scaled) < (
+            threshold_193v211 * (np.mean(m193.data[disk_mask]) + np.mean(m211.data[disk_mask]))
+        )
 
-    mask_171_193 = (d171_clipped_scaled / d193_clipped_scaled) >= (
-        (np.mean(m171.data[disk_mask]) * threshold_171v193) / np.mean(m193.data[disk_mask])
-    )
+        mask_171_193 = (d171_clipped_scaled / d193_clipped_scaled) >= (
+            (np.mean(m171.data[disk_mask]) * threshold_171v193) / np.mean(m193.data[disk_mask])
+        )
 
     final_mask = mask_171_211 * mask_211_193 * mask_171_193
     return final_mask
@@ -70,7 +78,7 @@ def generate_candidate_mask(m171, m193, m211):
 
 def calculate_area_map(im_map: Map):
     """
-    Generate map where each pixel is the area the pixel subtends on the sun.
+    Generate map where each pixel is the area the pixel subtends on the solar surface.
 
     Parameters
     ----------
@@ -86,7 +94,7 @@ def calculate_area_map(im_map: Map):
     disk_mask = coordinate_is_on_solar_disk(coordinates)
 
     pixel_scale = im_map.scale[0] * 1 * u.pixel
-    pixel_size = pixel_scale.to_value(u.rad) * im_map.dsun
+    pixel_size = np.arcsin(pixel_scale / im_map.rsun_obs).to_value(u.rad) * im_map.rsun_meters
     pixel_area = pixel_size**2
 
     radial_angle = np.arccos(np.cos(coordinates.Tx[disk_mask]) * np.cos(coordinates.Ty[disk_mask]))
@@ -100,11 +108,26 @@ def calculate_area_map(im_map: Map):
 
 
 @u.quantity_input()
-def filter_by_area(mask: NDArray, map_obj: Map, min_area: Quantity["area"] = 1e4 * u.Mm**2):  # noqa: F821
+def filter_ch(mask: NDArray, map_obj: Map, min_area: Quantity["area"] = 1e4 * u.Mm**2, on_disk: bool = True):  # noqa: F821
+    r"""
+    Filter coronal hole candidate masks
+
+    Parameters
+    ----------
+    mask :
+        Candidate CH mask
+    map_obj
+
+    min_area
+        Remove CH with area below this value.
+    on_disk :
+        Remove CHs that are not on the disk (above the limb)
+    """
     area_map, disk_mask = calculate_area_map(map_obj)
 
-    labeled_mask = measure.label(mask * disk_mask)
+    labeled_mask = measure.label(mask * disk_mask if on_disk else mask)
     regions = measure.regionprops(labeled_mask)
+    breakpoint()
 
     filtered_regions = []
     for region in regions:
@@ -113,12 +136,13 @@ def filter_by_area(mask: NDArray, map_obj: Map, min_area: Quantity["area"] = 1e4
         if contours:
             encompassing_contour = sorted(contours, key=lambda x: x.size, reverse=True)[0]
             filled_region_mask = polygon2mask(region_mask.shape, encompassing_contour)
-            region_surface_area = area_map[region_mask].sum()
+            region_surface_area = area_map[filled_region_mask].sum()
             labeled_mask[filled_region_mask] = region.label
             if region_surface_area >= min_area and not np.all(region_mask & disk_mask):
                 region.surface_area = region_surface_area
                 filtered_regions.append(region)
             else:
+                log.debug(f"Removing CH region {region.label}")
                 labeled_mask[region_mask] = 0
 
     filtered_regions = sorted(filtered_regions, key=lambda region: region.surface_area, reverse=True)
@@ -134,11 +158,11 @@ def get_coronal_holes(filtered_regions, map_obj, labeled_mask):
         world_coords = map_obj.pixel_to_world(coords[:, 1] * u.pix, coords[:, 0] * u.pix)
         # heliographic_coords = world_coords.transform_to("heliographic_stonyhurst")
 
-        wb = world_coords[coords[:, 1].argmax()]
-        eb = world_coords[coords[:, 1].argmin()]
+        wb = world_coords[np.nanargmax(world_coords.Tx)]
+        eb = world_coords[np.nanargmin(world_coords.Tx)]
 
-        nb = world_coords[coords[:, 0].argmax()]
-        sb = world_coords[coords[:, 0].argmin()]
+        nb = world_coords[np.nanargmax(world_coords.Ty)]
+        sb = world_coords[np.nanargmin(world_coords.Ty)]
 
         extent_lon = (
             wb.transform_to("heliographic_stonyhurst").lon - eb.transform_to("heliographic_stonyhurst").lon
@@ -194,7 +218,7 @@ def map_threshold(im_map):
 
 def chimera(m171, m193, m211):
     ch_mask = generate_candidate_mask(m171, m193, m211)
-    labeled_mask, filtered_regions = filter_by_area(ch_mask, m171)
+    labeled_mask, filtered_regions = filter_ch(ch_mask, m171)
 
     coronal_holes = get_coronal_holes(filtered_regions, m171, labeled_mask)
 
@@ -215,8 +239,24 @@ def chimera(m171, m193, m211):
         )
 
 
-if __name__ == "__main__":
-    m171 = Map("https://jsoc1.stanford.edu/data/aia/synoptic/2016/10/31/H0200/AIA20161031_0232_0171.fits")
-    m193 = Map("https://jsoc1.stanford.edu/data/aia/synoptic/2016/10/31/H0200/AIA20161031_0232_0193.fits")
-    m211 = Map("https://jsoc1.stanford.edu/data/aia/synoptic/2016/10/31/H0200/AIA20161031_0232_0211.fits")
+def run_chimera(date):
+    date = parse_time(date)
+    start = date - 1 * u.min
+    end = date + 1 * u.min
+    q = Fido.search(
+        a.Time(start, end, near=date),
+        a.Instrument.aia,
+        a.Wavelength(171 * u.angstrom) | a.Wavelength(211 * u.angstrom) | a.Wavelength(94 * u.angstrom),
+    )
+    if len(q) != 3:
+        raise ValueError("Missing one of the required wavelengths")
+    files = Fido.fetch(q)
+    m171, m193, m211 = Map(sorted(files))
     chimera(m171, m193, m211)
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("date", type=parse_time)
+    args = parser.parse_args()
+    run_chimera(args.date)
