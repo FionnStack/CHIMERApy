@@ -123,14 +123,25 @@ def filter_ch(mask: NDArray, map_obj: Map, min_area: Quantity["area"] = 1e4 * u.
     on_disk :
         Remove CHs that are not on the disk (above the limb)
     """
+    log.debug("Calculating area map")
     area_map, disk_mask = calculate_area_map(map_obj)
-
+    log.debug("Labeling regions")
     labeled_mask = measure.label(mask * disk_mask if on_disk else mask)
+    log.debug("Finding regions")
     regions = measure.regionprops(labeled_mask)
-    breakpoint()
+    log.debug("Filtering regions by pixel area size")
+
+    min_pixel_area = 100
+    filtered_regions_pixel_area = [region for region in regions if region.area >= min_pixel_area]
+
+    log.debug(f"Found {len(regions)} regions, {len(filtered_regions_pixel_area)} after pixel area filtering")
 
     filtered_regions = []
-    for region in regions:
+    log.debug(f"Found {len(filtered_regions_pixel_area)} regions")
+    #import ipdb; ipdb.set_trace()
+    #breakpoint()
+    for region in filtered_regions_pixel_area:
+        log.debug(f"Processing region {region.label} with area {region.area}")
         region_mask = labeled_mask == region.label
         contours = measure.find_contours(region_mask)
         if contours:
@@ -141,9 +152,6 @@ def filter_ch(mask: NDArray, map_obj: Map, min_area: Quantity["area"] = 1e4 * u.
             if region_surface_area >= min_area and not np.all(region_mask & disk_mask):
                 region.surface_area = region_surface_area
                 filtered_regions.append(region)
-            else:
-                log.debug(f"Removing CH region {region.label}")
-                labeled_mask[region_mask] = 0
 
     filtered_regions = sorted(filtered_regions, key=lambda region: region.surface_area, reverse=True)
 
@@ -156,7 +164,6 @@ def get_coronal_holes(filtered_regions, map_obj, labeled_mask):
     for region in filtered_regions:
         coords = region.coords
         world_coords = map_obj.pixel_to_world(coords[:, 1] * u.pix, coords[:, 0] * u.pix)
-        # heliographic_coords = world_coords.transform_to("heliographic_stonyhurst")
 
         wb = world_coords[np.nanargmax(world_coords.Tx)]
         eb = world_coords[np.nanargmin(world_coords.Tx)]
@@ -217,10 +224,13 @@ def map_threshold(im_map):
 
 
 def chimera(m171, m193, m211):
+    log.debug("Generating candidate mask")
     ch_mask = generate_candidate_mask(m171, m193, m211)
+    log.debug("Filtering regions")
     labeled_mask, filtered_regions = filter_ch(ch_mask, m171)
-
+    log.debug("Getting coronal holes")
     coronal_holes = get_coronal_holes(filtered_regions, m171, labeled_mask)
+    log.debug("Finished")
 
     for ch in coronal_holes:
         print(
@@ -237,7 +247,7 @@ def chimera(m171, m193, m211):
             f"N: {ch['nb'].transform_to('heliographic_stonyhurst').lat.value:.2f}, S:{ch['sb'].transform_to('heliographic_stonyhurst').lat.value:.2f}"
             f"N-S Extent = {ch['extent_lat']:.2f} °"
         )
-
+    return labeled_mask, ch_mask, coronal_holes
 
 def run_chimera(date):
     date = parse_time(date)

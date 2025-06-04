@@ -15,21 +15,26 @@ from skimage.util import img_as_ubyte
 
 import astropy.units as u
 from astropy import wcs
+from sunpy.map import Map
 from astropy.io import fits
 from astropy.modeling.models import Gaussian2D
 
+def imhmi(m171):
+    """Create a dummy HMI map for the original CHIMERA code."""
+    imhmi = Map(np.zeros_like(m171.data), m171.meta)
+    return imhmi
 
 def chimera_legacy(im171=None, im193=None, im211=None, imhmi=None):
     file_path = "./"
 
     if im171 is None:
-        im171 = glob.glob(file_path + "*171*.fts.gz")
-        im193 = glob.glob(file_path + "*193*.fts.gz")
-        im211 = glob.glob(file_path + "*211*.fts.gz")
-        imhmi = glob.glob(file_path + "*hmi*.fts.gz")
+        im171 = Map("C:\\Users\\aoife\\CHIMERApy\\chimerapy\\scripts\\downloaded_data\\aia.lev1.171A_2016_10_31T00_00_10.35Z.image_lev1.fits")
+        im193 = Map("C:\\Users\\aoife\\CHIMERApy\\chimerapy\\scripts\\downloaded_data\\aia.lev1.193A_2016_10_31T00_00_05.85Z.image_lev1.fits")
+        im211 = Map("C:\\Users\\aoife\\CHIMERApy\\chimerapy\\scripts\\downloaded_data\\aia.lev1.211A_2016_10_31T00_00_10.62Z.image_lev1.fits")
+        imhmi_map = imhmi(im171)
 
     circ, data, datb, datc, dattoarc, hedb, iarr, props, rs, slate, center, xgrid, ygrid = chimera(
-        im171, im193, im211, imhmi
+        im171, im193, im211, imhmi_map
     )
 
     # =====sets ident back to max value of iarr======
@@ -42,8 +47,8 @@ def chimera_legacy(im171=None, im193=None, im211=None, imhmi=None):
     return circ, data, datb, datc, dattoarc, hedb, iarr, props, rs, slate, center, xgrid, ygrid
 
 
-def chimera(im171, im193, im211, imhmi):
-    if im171 == [] or im193 == [] or im211 == [] or imhmi == []:
+def chimera(im171, im193, im211, imhmi_map):
+    if im171 == [] or im193 == [] or im211 == [] or imhmi_map == []:
         print("Not all required files present")
         sys.exit()
     # =====Reads in data and resizes images=====
@@ -61,8 +66,8 @@ def chimera(im171, im193, im211, imhmi):
     datc = fits.getdata(im211[0], ext=0) / (hedc["EXPTIME"])
     dn = RectBivariateSpline(x, x, datc, kx=1, ky=1)
     datc = dn(np.arange(0, 4096), np.arange(0, 4096))
-    hedm = fits.getheader(imhmi[0], hdu_number)
-    datm = fits.getdata(imhmi[0], ext=0)
+    hedm = fits.getheader(imhmi_map[0], hdu_number)
+    datm = fits.getdata(imhmi_map[0], ext=0)
     # dn = scipy.interpolate.interp2d(np.arange(4096), np.arange(4096), datm)
     # datm = dn(np.arange(0, 1024)*4, np.arange(0, 1024)*4)
     if hedm["crota1"] > 90:
